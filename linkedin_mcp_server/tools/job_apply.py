@@ -38,7 +38,13 @@ logger = logging.getLogger(__name__)
 PROFILE_PATH = os.path.expanduser("~/.config/career-ops/apply-profile.yml")
 APPLY_LOG = os.path.expanduser("~/.local/share/career-ops/apply-log.jsonl")
 
-_DIALOG = "[role='dialog']"
+try:
+    from linkedin_mcp_server.scraping.extractor import _DIALOG_SELECTOR as _DIALOG
+except Exception:  # fallback if upstream renames it
+    _DIALOG = 'dialog[open], [role="dialog"]'
+
+_APPLIED_RE = re.compile(r"solicitado|applied|application sent|solicitud enviada|ya (te postulas|has postulado)", re.I)
+_APPLY_RE = re.compile(r"solicitar|easy apply|postularme|postular", re.I)
 
 
 def _load_profile() -> dict[str, Any]:
@@ -113,17 +119,22 @@ async def _open_easy_apply(extractor: Any, job_id: str) -> dict[str, Any]:
     await page.goto(f"https://www.linkedin.com/jobs/view/{job_id}/", wait_until="domcontentloaded", timeout=30000)
     await page.wait_for_timeout(2500)
     text = await page.evaluate("() => document.body?.innerText || ''")
+    if _APPLIED_RE.search(text):
+        return {"ok": False, "reason": "already applied to this job"}
     if not re.search(r"solicitud sencilla|easy apply", text, re.I):
         return {"ok": False, "reason": "not an Easy Apply posting (external ATS or no apply control)"}
-    clicked = await extractor.click_button_by_text("Solicitar") or await extractor.click_button_by_text("Easy Apply")
-    if not clicked:
-        # Fallback: click first apply-ish button in job view.
-        btn = page.locator("button").filter(has_text=re.compile(r"Solicitar|Easy Apply", re.I)).first
-        try:
-            await btn.click(timeout=5000)
-            clicked = True
-        except Exception:
-            clicked = False
+    # Soft contains-match first: LinkedIn wraps button text in nested spans.
+    clicked = False
+    btn = page.locator("button, a").filter(has_text=_APPLY_RE).first
+    try:
+        await btn.scroll_into_view_if_needed(timeout=5000)
+    except Exception:
+        pass
+    try:
+        await btn.click(timeout=8000)
+        clicked = True
+    except Exception:
+        clicked = await extractor.click_button_by_text("Solicitar") or await extractor.click_button_by_text("Easy Apply")
     if not clicked:
         return {"ok": False, "reason": "apply button not clickable"}
     await page.wait_for_timeout(2500)
