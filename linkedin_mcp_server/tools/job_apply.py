@@ -89,11 +89,18 @@ def _propose_answer(label: str, qtype: str, options: list[str], profile: dict[st
         v = p.get("notice_statement")
         if v:
             return {"value": v, "source": "profile", "needs_user": False}
-    if hit("years", "años", "anos", "experience", "experiencia") and p.get("years_statements"):
-        for rule in p["years_statements"]:
-            if _norm(str(rule.get("match", ""))) and _norm(str(rule["match"])) in lab:
-                return {"value": rule["value"], "source": "profile", "needs_user": False}
-        return {"value": None, "source": None, "needs_user": True, "reason": "years question needs user wording"}
+    if hit("years", "años", "anos", "experience", "experiencia"):
+        describe = qtype == "textarea" or any(
+            w in lab for w in ("describ", "detall", "describe", "detail", "cuéntenos", "cuentenos", "explique"))
+        if describe:
+            # Free-text experience question → best-matching descriptive rule.
+            for rule in p.get("years_statements", []):
+                if _norm(str(rule.get("match", ""))) and _norm(str(rule["match"])) in lab:
+                    return {"value": rule["value"], "source": "profile", "needs_user": False}
+            return {"value": None, "source": None, "needs_user": True,
+                    "reason": "descriptive experience question, no matching rule"}
+        # Numeric/select years question → default years for all (user-approved).
+        return {"value": str(p.get("default_years", 3)), "source": "profile", "needs_user": False}
     if qtype in ("select", "radio") and options:
         # Never auto-pick constrained options (degree/auth/veteran/disability...).
         return {"value": None, "source": None, "needs_user": True, "reason": "constrained choice — user must pick"}
@@ -161,8 +168,14 @@ async def _extract_questions(page: Any) -> list[dict[str, Any]]:
                 sel = b.locator("select").first
                 radios = b.locator("input[type='radio']")
                 files = b.locator("input[type='file']")
+                tarea = b.locator("textarea").first
                 txt = b.locator("input[type='text'], input:not([type]), textarea").first
                 qtype, options = "text", []
+                try:
+                    if await tarea.count() > 0:
+                        qtype = "textarea"
+                except Exception:
+                    pass
                 if await files.count() > 0:
                     qtype = "file"
                 elif await sel.count() > 0:
