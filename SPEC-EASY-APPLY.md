@@ -4,7 +4,8 @@
 
 - **Fork:** `github.com/JO0812/linkedin-mcp-server` (branch `main` holds this feature; feature branch `gated-easy-apply` also exists)
 - **Upstream:** `github.com/stickerdaniel/linkedin-mcp-server` (FastMCP-based LinkedIn scraping MCP server, Playwright/Patchright-driven headless Chromium)
-- **Local checkout:** `~/apps/linkedin-mcp-apply`
+- **Canonical checkout:** `/home/jo/repo/linkedin-mcp-server` (all feature work, commits, and deploys happen here)
+- **Secondary checkout:** `~/apps/linkedin-mcp-apply` (mirror only — never edit or commit there)
 - **Installed as:** `uv tool` binary `mcp-server-linkedin` (`~/.local/bin/mcp-server-linkedin`, venv at `~/.local/share/uv/tools/mcp-server-linkedin/`)
 - **Install source (pinned):** `git+https://github.com/JO0812/linkedin-mcp-server` with `fastmcp<4`, `mcp<2`
 - **License:** inherits upstream (keep attribution; do not strip upstream headers)
@@ -90,6 +91,7 @@ Also done: fork created under `JO0812`, local remote → fork, `main` force-sync
 2. **Server processes outlive reinstalls.** The MCP gateway keeps `mcp-server-linkedin --tool-timeout 300` processes warm; they serve **stale code** until killed. After every reinstall: `pkill -9 -f "mcp-server-linkedin --too[l]"` (bracket trick avoids matching your own shell), then MCP `connect: linkedin` to respawn fresh, then test. (An early `pkill -f` with the literal string killed the agent's own shell — use the `[l]` form.)
 3. **Reinstalls never touch user data.** Session/cookies live in `~/.linkedin-mcp/` (outside the venv). Backup exists at `~/apps/linkedin-mcp-backup-profile`. Re-login has never been needed.
 4. **Diagnostics are the debugger.** There is no interactive browser; every failure theory must be answered by data returned in `diagnostics`.
+5. **One canonical checkout.** All edits, commits, and pushes come from `/home/jo/repo/linkedin-mcp-server`. The `~/apps/linkedin-mcp-apply` copy and the uv-tool venv are read-only consumers; a change made anywhere else will be silently overwritten by the next push from canonical.
 
 ## 8. Current blocker (with evidence, req `4467280735` WorkCapIT)
 

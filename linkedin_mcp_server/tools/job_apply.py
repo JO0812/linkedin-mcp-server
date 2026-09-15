@@ -528,6 +528,31 @@ async def _close_modal(page: Any) -> None:
         pass
 
 
+async def _modal_inventory(page: Any) -> dict[str, Any]:
+    """Structural snapshot of the open modal for selector debugging."""
+    inv: dict[str, Any] = {}
+    try:
+        dlg = page.locator(_DIALOG).first
+        inv["text"] = (await dlg.inner_text(timeout=5000))[:1200]
+        for sel in ("label", "input", "select", "textarea", "fieldset",
+                    "[role='combobox']", "[role='radiogroup']", "button"):
+            try:
+                inv[f"n_{sel}"] = await dlg.locator(sel).count()
+            except Exception:
+                pass
+        try:
+            types: dict[str, int] = {}
+            for t in await dlg.locator("input").evaluate_all(
+                    "els => els.map(e => e.getAttribute('type') || 'notype')"):
+                types[str(t)] = types.get(str(t), 0) + 1
+            inv["input_types"] = types
+        except Exception:
+            pass
+    except Exception as exc:
+        inv["error"] = str(exc)[:200]
+    return inv
+
+
 async def _extract_questions(page: Any) -> list[dict[str, Any]]:
     """Read every question in the open Easy Apply modal (all steps)."""
     questions: list[dict[str, Any]] = []
@@ -681,6 +706,7 @@ def register_apply_tools(
                 return {"job_id": job_id, "status": "cannot_prepare", **opened}
             page = extractor._page
             questions = await _extract_questions(page)
+            inv = await _modal_inventory(page) if not questions else {}
             await _close_modal(page)
             profile = _load_profile()
             draft = []
@@ -703,6 +729,7 @@ def register_apply_tools(
                 "status": "draft_ready",
                 "submitted": False,
                 "questions": draft,
+                "modal_inventory": inv,
                 "note": "Review/edit every answer, then command submit_application with the approved set.",
             }
         except AuthenticationError as e:
