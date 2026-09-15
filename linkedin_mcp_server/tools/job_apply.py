@@ -37,7 +37,7 @@ from linkedin_mcp_server.error_handler import raise_tool_error
 
 logger = logging.getLogger(__name__)
 
-TOOL_BUILD = "2026-09-14.18"
+TOOL_BUILD = "2026-09-14.19"
 
 _WALK: list[dict[str, Any]] = []
 _WALK_JOB = ""
@@ -1152,7 +1152,7 @@ def register_apply_tools(
                     if qlab in approved:
                         # Idempotent fill: current value already equals the
                         # approved answer (e.g. pre-selected radio) → keep.
-                        if q.get("current") and _norm(str(q["current"])) == approved[qlab]:
+                        if q.get("current") and _norm(str(q["current"])) == _norm(approved[qlab]):
                             filled.append(q["label"])
                             continue
                         ok = await _fill_field(
