@@ -37,7 +37,7 @@ from linkedin_mcp_server.error_handler import raise_tool_error
 
 logger = logging.getLogger(__name__)
 
-TOOL_BUILD = "2026-09-14.10"
+TOOL_BUILD = "2026-09-14.11"
 
 _WALK: list[dict[str, Any]] = []
 _WALK_JOB = ""
@@ -650,7 +650,7 @@ async def _resolve_control_label(dlg: Any, c: Any) -> str:
 
 
 async def _extract_questions(
-    page: Any, job_id: str = ""
+    page: Any, job_id: str = "", advance: bool = True
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Read every question in the Easy Apply modal (all steps).
 
@@ -734,6 +734,10 @@ async def _extract_questions(
                 questions.append(entry)
             except Exception:
                 continue
+        if not advance:
+            _WALK.append({"step": seen_steps, "controls": n,
+                          "advance": False})
+            break
         # Advance to next step without submitting (Siguiente/Next only).
         nxt = dlg.locator("button").filter(has_text=_NEXT_STEP_LABELS).first
         step_info: dict[str, Any] = {"step": seen_steps, "controls": n}
@@ -1046,26 +1050,67 @@ def register_apply_tools(
                 _log_apply(attempt)
                 return attempt
             page = extractor._page
-            questions, _walk = await _extract_questions(page, job_id)
-            by_label = {_norm(q["label"]): q for q in questions}
+            # Fill WHILE walking: each step's controls only exist while
+            # that step is current, so extract-fill-advance per step.
+            approved = {_norm(str(a.get("label", ""))): str(a.get("value", ""))
+                        for a in answers}
             filled, missing_required, failed = [], [], []
+            cv_done = False
+            for _step in range(8):
+                modal = await _apply_modal(page)
+                if modal is None:
+                    attempt.update(status="aborted", reason="apply modal lost mid-fill")
+                    _log_apply(attempt)
+                    return attempt
+                try:
+                    send_probe = modal.locator("button").filter(
+                        has_text=_SUBMIT_LABELS)
+                    if await send_probe.count() > 0:
+                        break  # Review screen reached
+                except Exception:
+                    pass
+                step_qs, _w = await _extract_questions(page, job_id, advance=False)
+                for q in step_qs:
+                    qlab = _norm(q["label"])
+                    if qlab in approved:
+                        ok = await _fill_field(page, q["label"], approved[qlab])
+                        (filled if ok else failed).append(q["label"])
+                    elif q["required"] and q["label"] not in missing_required:
+                        missing_required.append(q["label"])
+                if cv_path and not cv_done:
+                    if await _fill_field(page, "__cv__", "", cv_path):
+                        cv_done = True
+                try:
+                    before = (await modal.inner_text(timeout=4000))[:200]
+                except Exception:
+                    before = ""
+                nxt = modal.locator("button").filter(has_text=_ADVANCE_LABELS).first
+                try:
+                    if await nxt.count() == 0:
+                        break
+                    await nxt.click(timeout=4000)
+                    await page.wait_for_timeout(1500)
+                except Exception:
+                    break
+                try:
+                    after_m = await _apply_modal(page)
+                    after = ((await after_m.inner_text(timeout=4000))[:200]
+                             if after_m is not None else "<gone>")
+                except Exception:
+                    after = "<err>"
+                if after == before and (missing_required or "__cv_upload__" in failed):
+                    break  # validation blocked advance; handled below
+            if cv_path and not cv_done:
+                failed.append("__cv_upload__")
             for a in answers:
-                lab = _norm(str(a.get("label", "")))
-                if lab not in by_label:
-                    failed.append(a.get("label"))
-                    continue
-                ok = await _fill_field(
-                    page, by_label[lab]["label"], str(a.get("value", ""))
-                )
-                (filled if ok else failed).append(a.get("label"))
-            for q in questions:
-                if q["required"] and _norm(q["label"]) not in {
-                    _norm(str(a.get("label", ""))) for a in answers
-                }:
-                    missing_required.append(q["label"])
-            if cv_path:
-                if not await _fill_field(page, "__cv__", "", cv_path):
-                    failed.append("__cv_upload__")
+                if _norm(str(a.get("label", ""))) not in filled + failed \
+                        and a.get("label") not in filled + failed:
+                    # approved answer never matched any step's question
+                    pass
+            unmatched = [a.get("label") for a in answers
+                         if _norm(str(a.get("label", ""))) not in
+                         {_norm(f) for f in filled} and a.get("label") not in failed]
+            failed.extend(unmatched)
             if missing_required or failed:
                 await _close_modal(page)
                 attempt.update(
