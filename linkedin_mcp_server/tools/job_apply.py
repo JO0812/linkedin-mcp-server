@@ -118,6 +118,16 @@ async def _open_easy_apply(extractor: Any, job_id: str) -> dict[str, Any]:
     page = extractor._page
     await page.goto(f"https://www.linkedin.com/jobs/view/{job_id}/", wait_until="domcontentloaded", timeout=30000)
     await page.wait_for_timeout(2500)
+    # A previous attempt may have left the Easy Apply modal open: reuse it.
+    try:
+        if await page.locator(_DIALOG).count() > 0:
+            dlg_text = await page.locator(_DIALOG).first.inner_text(timeout=5000)
+            if re.search(r"solicitar|easy apply|postular|curriculum|teléfono|año", dlg_text, re.I):
+                return {"ok": True, "reused_open_modal": True}
+            await _close_modal(page)
+            await page.wait_for_timeout(1000)
+    except Exception:
+        pass
     text = await page.evaluate("() => document.body?.innerText || ''")
     if _APPLIED_RE.search(text):
         return {"ok": False, "reason": "already applied to this job"}
