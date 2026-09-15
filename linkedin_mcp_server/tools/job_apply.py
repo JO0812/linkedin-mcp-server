@@ -37,7 +37,7 @@ from linkedin_mcp_server.error_handler import raise_tool_error
 
 logger = logging.getLogger(__name__)
 
-TOOL_BUILD = "2026-09-14.13"
+TOOL_BUILD = "2026-09-14.14"
 
 _WALK: list[dict[str, Any]] = []
 _WALK_JOB = ""
@@ -933,6 +933,8 @@ def register_apply_tools(
             profile = _load_profile()
             draft = []
             for q in questions:
+                if len(q.get("options", [])) > 8:
+                    q = {**q, "options": q["options"][:5] + [f"...+{len(q['options']) - 5} more"]}
                 prop = _propose_answer(
                     q["label"], q["type"], q["options"], profile,
                     current=q.get("current", ""),
