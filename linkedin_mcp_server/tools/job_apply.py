@@ -726,7 +726,7 @@ async def _extract_questions(
                     try:
                         gtext = await group.first.evaluate(
                             "el => { const n = el.closest('fieldset') || el.closest('div');"
-                            " return ((n ? n.innerText : '') || '').split('\\n').map(s => s.trim()).filter(s => s && !/^(yes|no|s[ií]|obligatorio|required|\*)$/i.test(s))[0] || ''; }")
+                            " return ((n ? n.innerText : '') || '').split('\\n').map(s => s.trim()).filter(s => s && !/^(yes|no|s[ií]|obligatorio|required|\\*)$/i.test(s))[0] || ''; }")
                         if gtext and len(gtext) > len(label):
                             label = gtext[:160]
                     except Exception:
