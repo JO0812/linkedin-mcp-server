@@ -1050,6 +1050,7 @@ dependencies = [
     { name = "patchright" },
     { name = "python-dotenv" },
     { name = "pywin32", marker = "sys_platform == 'win32'" },
+    { name = "pyyaml" },
     { name = "rich" },
 ]
 
@@ -1074,6 +1075,7 @@ requires-dist = [
     { name = "patchright", specifier = ">=1.55.0" },
     { name = "python-dotenv", specifier = ">=1.1.1" },
     { name = "pywin32", marker = "sys_platform == 'win32'", specifier = ">=312" },
+    { name = "pyyaml", specifier = ">=6" },
     { name = "rich", specifier = ">=15.0.0" },
 ]
 
