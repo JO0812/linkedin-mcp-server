@@ -37,7 +37,7 @@ from linkedin_mcp_server.error_handler import raise_tool_error
 
 logger = logging.getLogger(__name__)
 
-TOOL_BUILD = "2026-09-14.15"
+TOOL_BUILD = "2026-09-14.16"
 
 _WALK: list[dict[str, Any]] = []
 _WALK_JOB = ""
@@ -819,17 +819,29 @@ async def _fill_field(
         return False
     try:
         # Radio group by name: pick the option matching the value.
+        # Option labels use the extraction-time logic (label[for]/wrap/value),
+        # NOT _resolve_control_label (which returns the group question text).
         if radio_name:
             try:
                 group = dlg.locator(
                     f"input[type='radio'][name='{radio_name}']")
                 m = await group.count()
+                try:
+                    opt_labels = await group.evaluate_all(
+                        """els => els.map(e => {
+                          const id = e.getAttribute('id');
+                          const lab = id ? document.querySelector(`label[for="${id}"]`) : null;
+                          const wrap = e.closest('label');
+                          const t = (lab ? lab.innerText : (wrap ? wrap.innerText : '')) || '';
+                          return (t.split('\n')[0] || e.value || '').trim().slice(0, 120);
+                        })""")
+                except Exception:
+                    opt_labels = []
                 for j in range(m):
                     try:
-                        opt = group.nth(j)
-                        olab = _norm(await _resolve_control_label(dlg, opt))
+                        olab = _norm(opt_labels[j] if j < len(opt_labels) else "")
                         if _norm(value) == olab or _norm(value) in olab:
-                            await opt.click(timeout=5000)
+                            await group.nth(j).click(timeout=5000)
                             return True
                     except Exception:
                         continue
