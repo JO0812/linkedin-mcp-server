@@ -37,7 +37,7 @@ from linkedin_mcp_server.error_handler import raise_tool_error
 
 logger = logging.getLogger(__name__)
 
-TOOL_BUILD = "2026-09-14.3"
+TOOL_BUILD = "2026-09-14.4"
 
 SCREENSHOT_DIR = os.environ.get("LINKEDIN_MCP_APPLY_SCREENSHOT_DIR", "")
 
@@ -155,6 +155,34 @@ def _looks_like_apply_form(text: str) -> bool:
     carries none of them, so it is never classified as reusable.
     """
     return bool(_APPLY_FORM_RE.search(text or ""))
+
+
+async def _apply_modal(page: Any) -> Any | None:
+    """Return the Easy Apply modal locator, disambiguated from popups.
+
+    LinkedIn renders several role="dialog" elements (global-search
+    typeahead popover, inert popovers). This picks the first dialog whose
+    text looks like an application form; popovers (`data-testid=
+    "popover-floating"`, `[inert]`) are never eligible. None when absent.
+    """
+    try:
+        all_dlgs = page.locator(
+            '[role="dialog"]:not([data-testid="popover-floating"]):not([inert]), '
+            "dialog[open]:not([data-testid='popover-floating']):not([inert])"
+        )
+        n = await all_dlgs.count()
+    except Exception:
+        return None
+    for i in range(n):
+        try:
+            dlg = all_dlgs.nth(i)
+            if _looks_like_apply_form(
+                await dlg.inner_text(timeout=4000)
+            ):
+                return dlg
+        except Exception:
+            continue
+    return None
 
 
 def _load_profile() -> dict[str, Any]:
@@ -501,11 +529,8 @@ async def _open_easy_apply(extractor: Any, job_id: str) -> dict[str, Any]:
             "diagnostics": diag,
         }
     await page.wait_for_timeout(2500)
-    try:
-        dialogs = await page.locator(_DIALOG).count()
-    except Exception:
-        dialogs = 0
-    if dialogs == 0:
+    modal = await _apply_modal(page)
+    if modal is None:
         diag = await _apply_failure_diag(
             page, job_id, open_dialog_text, click_error, dialog_still_open
         )
@@ -532,7 +557,10 @@ async def _modal_inventory(page: Any) -> dict[str, Any]:
     """Structural snapshot of the open modal for selector debugging."""
     inv: dict[str, Any] = {}
     try:
-        dlg = page.locator(_DIALOG).first
+        dlg = await _apply_modal(page)
+        if dlg is None:
+            inv["modal"] = "none-found"
+            return inv
         inv["text"] = (await dlg.inner_text(timeout=5000))[:1200]
         for sel in ("label", "input", "select", "textarea", "fieldset",
                     "[role='combobox']", "[role='radiogroup']", "button"):
@@ -553,56 +581,107 @@ async def _modal_inventory(page: Any) -> dict[str, Any]:
     return inv
 
 
+async def _resolve_control_label(dlg: Any, c: Any) -> str:
+    """Best-effort visible label for one form control."""
+    try:
+        aria = (await c.get_attribute("aria-label") or "").strip()
+        if aria:
+            return aria
+    except Exception:
+        pass
+    try:
+        cid = await c.get_attribute("id") or ""
+        if cid:
+            lab = dlg.locator(f"label[for='{cid}']")
+            if await lab.count() > 0:
+                t = (await lab.first.inner_text()).strip()
+                if t:
+                    return t
+    except Exception:
+        pass
+    try:
+        row = await c.evaluate(
+            "el => { const n = el.closest('div');"
+            " return ((n ? n.innerText : '') || '').split('\\n')[0].slice(0, 160); }"
+        )
+        return (row or "").strip()
+    except Exception:
+        return ""
+
+
 async def _extract_questions(page: Any) -> list[dict[str, Any]]:
-    """Read every question in the open Easy Apply modal (all steps)."""
+    """Read every question in the Easy Apply modal (all steps).
+
+    Control-first discovery: LinkedIn renders fields without <label>
+    elements, so we iterate inputs/selects/textareas and resolve each
+    control's visible label (aria-label, <label for>, else row text).
+    """
     questions: list[dict[str, Any]] = []
     seen_steps = 0
     while seen_steps < 6:
-        dlg = page.locator(_DIALOG).first
+        dlg = await _apply_modal(page)
+        if dlg is None:
+            break
         try:
-            blocks = dlg.locator("label, fieldset")
-            n = await blocks.count()
+            controls = dlg.locator("input, select, textarea")
+            n = await controls.count()
         except Exception:
             break
         for i in range(n):
             try:
-                b = blocks.nth(i)
-                label = (await b.inner_text()).strip()
+                c = controls.nth(i)
+                tag = (await c.evaluate("el => el.tagName.toLowerCase()"))
+                itype = ((await c.get_attribute("type")) or "").lower()
+                if tag == "input" and itype in ("hidden", "submit", "button"):
+                    continue
+                label = await _resolve_control_label(dlg, c)
                 if not label or any(q["label"] == label for q in questions):
                     continue
-                # Determine control type + options.
-                sel = b.locator("select").first
-                radios = b.locator("input[type='radio']")
-                files = b.locator("input[type='file']")
-                tarea = b.locator("textarea").first
-                txt = b.locator("input[type='text'], input:not([type]), textarea").first
                 qtype, options = "text", []
+                if tag == "textarea":
+                    qtype = "textarea"
+                elif itype == "file":
+                    qtype = "file"
+                elif tag == "select":
+                    qtype = "select"
+                    opts = await c.locator("option").all_inner_texts()
+                    options = [o.strip() for o in opts if o.strip()]
+                elif itype == "radio":
+                    name = (await c.get_attribute("name")) or ""
+                    group = dlg.locator(f"input[type='radio'][name='{name}']") \
+                        if name else dlg.locator("input[type='radio']")
+                    qtype = "radio"
+                    try:
+                        vals = await group.evaluate_all(
+                            "els => els.map(e => (e.value || e.getAttribute('aria-label') || '').trim())")
+                        options = [v for v in vals if v]
+                    except Exception:
+                        options = []
+                    # One entry per radio group, not per button.
+                    if any(q.get("radio_name") == name for q in questions):
+                        continue
                 try:
-                    if await tarea.count() > 0:
-                        qtype = "textarea"
+                    req = await c.get_attribute("aria-required")
+                except Exception:
+                    req = None
+                required = req == "true" or bool(
+                    re.search(r"\*|obligatorio|required", label, re.I))
+                entry: dict[str, Any] = {
+                    "label": label,
+                    "type": qtype,
+                    "options": options,
+                    "required": required,
+                }
+                if qtype == "radio":
+                    entry["radio_name"] = name
+                try:
+                    cur = await c.evaluate(
+                        "el => (el.value !== undefined ? el.value : '').slice(0, 120)")
+                    if cur:
+                        entry["current"] = cur
                 except Exception:
                     pass
-                if await files.count() > 0:
-                    qtype = "file"
-                elif await sel.count() > 0:
-                    qtype = "select"
-                    opts = await sel.locator("option").all_inner_texts()
-                    options = [o.strip() for o in opts if o.strip()]
-                elif await radios.count() > 0:
-                    qtype = "radio"
-                    opts = await b.locator("label").all_inner_texts()
-                    options = [o.strip() for o in opts if o.strip()]
-                elif await txt.count() == 0:
-                    continue
-                required = bool(re.search(r"\*|obligatorio|required", label, re.I))
-                questions.append(
-                    {
-                        "label": label,
-                        "type": qtype,
-                        "options": options,
-                        "required": required,
-                    }
-                )
+                questions.append(entry)
             except Exception:
                 continue
         # Advance to next step without submitting (Siguiente/Next only).
@@ -623,8 +702,22 @@ async def _fill_field(
     page: Any, label: str, value: str, cv_path: str | None = None
 ) -> bool:
     """Fill one field matched by its label. Returns success."""
-    dlg = page.locator(_DIALOG).first
+    dlg = await _apply_modal(page)
+    if dlg is None:
+        return False
     try:
+        # Direct hit: control whose aria-label equals the question label.
+        direct = dlg.locator(f"[aria-label='{label}']").first
+        try:
+            if await direct.count() > 0:
+                tag = await direct.evaluate("el => el.tagName.toLowerCase()")
+                if tag == "select":
+                    await direct.select_option(label=value, timeout=5000)
+                    return True
+                await direct.fill(value, timeout=5000)
+                return True
+        except Exception:
+            pass
         # File upload (CV).
         if cv_path and label == "__cv__":
             inp = dlg.locator("input[type='file']").first
@@ -869,7 +962,11 @@ def register_apply_tools(
                 _log_apply(attempt)
                 return attempt
             # Walk Next until Review, then Submit.
-            dlg = page.locator(_DIALOG).first
+            dlg = await _apply_modal(page)
+            if dlg is None:
+                attempt.update(status="aborted", reason="apply modal lost before submit walk")
+                _log_apply(attempt)
+                return attempt
             for _ in range(6):
                 nxt = dlg.locator("button").filter(has_text=_ADVANCE_LABELS).first
                 try:
