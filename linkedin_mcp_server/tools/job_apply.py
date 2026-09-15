@@ -37,7 +37,9 @@ from linkedin_mcp_server.error_handler import raise_tool_error
 
 logger = logging.getLogger(__name__)
 
-TOOL_BUILD = "2026-09-14.4"
+TOOL_BUILD = "2026-09-14.5"
+
+_WALK: list[dict[str, Any]] = []
 
 SCREENSHOT_DIR = os.environ.get("LINKEDIN_MCP_APPLY_SCREENSHOT_DIR", "")
 
@@ -292,15 +294,29 @@ def _norm(s: str) -> str:
 
 
 def _propose_answer(
-    label: str, qtype: str, options: list[str], profile: dict[str, Any]
+    label: str,
+    qtype: str,
+    options: list[str],
+    profile: dict[str, Any],
+    current: str = "",
 ) -> dict[str, Any]:
-    """Propose an answer from profile facts. Never invents."""
+    """Propose an answer from profile facts. Never invents.
+
+    User-approved rule (2026-09-14): prefilled LinkedIn contact values are
+    kept as-is — the profile value is only proposed for EMPTY fields.
+    """
     lab = _norm(label)
     p = profile
 
     def hit(*keys: str) -> bool:
         return any(k in lab for k in keys)
 
+    is_contact = hit(
+        "phone", "teléfono", "telefono", "móvil", "movil", "celular",
+        "email", "correo", "location", "ubicaci", "city", "ciudad",
+    )
+    if is_contact and (current or "").strip():
+        return {"value": current.strip(), "source": "linkedin-current", "needs_user": False}
     if hit("phone", "teléfono", "telefono", "móvil", "movil", "celular") and p.get(
         "phone"
     ):
@@ -686,16 +702,34 @@ async def _extract_questions(page: Any) -> list[dict[str, Any]]:
                 continue
         # Advance to next step without submitting (Siguiente/Next only).
         nxt = dlg.locator("button").filter(has_text=_NEXT_STEP_LABELS).first
+        step_info: dict[str, Any] = {"step": seen_steps, "controls": n}
         try:
-            if await nxt.count() > 0 and await nxt.is_enabled():
-                await nxt.click(timeout=4000)
-                await page.wait_for_timeout(1500)
-                seen_steps += 1
-                continue
-        except Exception:
-            pass
+            found = await nxt.count() > 0
+            step_info["next_found"] = found
+            if found:
+                step_info["next_enabled"] = await nxt.is_enabled()
+                if step_info["next_enabled"]:
+                    await nxt.click(timeout=4000)
+                    await page.wait_for_timeout(1500)
+                    step_info["next_clicked"] = True
+                    try:
+                        after = await _apply_modal(page)
+                        step_info["after"] = (
+                            (await after.inner_text(timeout=4000))[:200]
+                            if after is not None else "<modal-gone>"
+                        )
+                    except Exception as exc:
+                        step_info["after_error"] = str(exc)[:150]
+                    seen_steps += 1
+                    _WALK.append(step_info)
+                    continue
+        except Exception as exc:
+            step_info["error"] = str(exc)[:200]
+        _WALK.append(step_info)
         break
-    return questions
+    questions_walk = list(_WALK)
+    _WALK.clear()
+    return questions, questions_walk
 
 
 async def _fill_field(
@@ -798,8 +832,9 @@ def register_apply_tools(
                 )
                 return {"job_id": job_id, "status": "cannot_prepare", **opened}
             page = extractor._page
-            questions = await _extract_questions(page)
+            questions, walk = await _extract_questions(page)
             inv = await _modal_inventory(page) if not questions else {}
+            inv["step_walk"] = walk
             if not questions:
                 try:
                     inv["screenshot"] = f"/tmp/apply-{job_id}.png"
@@ -816,7 +851,10 @@ def register_apply_tools(
             profile = _load_profile()
             draft = []
             for q in questions:
-                prop = _propose_answer(q["label"], q["type"], q["options"], profile)
+                prop = _propose_answer(
+                    q["label"], q["type"], q["options"], profile,
+                    current=q.get("current", ""),
+                )
                 draft.append({**q, **prop})
             await ctx.report_progress(
                 progress=100, total=100, message="Draft ready, modal closed"
@@ -931,7 +969,7 @@ def register_apply_tools(
                 _log_apply(attempt)
                 return attempt
             page = extractor._page
-            questions = await _extract_questions(page)
+            questions, _walk = await _extract_questions(page)
             by_label = {_norm(q["label"]): q for q in questions}
             filled, missing_required, failed = [], [], []
             for a in answers:
