@@ -130,13 +130,34 @@ async def _open_easy_apply(extractor: Any, job_id: str) -> dict[str, Any]:
         await btn.scroll_into_view_if_needed(timeout=5000)
     except Exception:
         pass
+    diag: dict[str, Any] = {"url": page.url}
+    try:
+        cands = page.locator("button, a").filter(has_text=_APPLY_RE)
+        diag["candidate_count"] = await cands.count()
+        texts = []
+        for i in range(min(await cands.count(), 6)):
+            try:
+                el = cands.nth(i)
+                texts.append({"text": (await el.inner_text())[:80],
+                              "visible": await el.is_visible(),
+                              "enabled": await el.is_enabled()})
+            except Exception:
+                texts.append({"text": "<unreadable>"})
+        diag["candidates"] = texts
+    except Exception as exc:
+        diag["diag_error"] = str(exc)[:200]
     try:
         await btn.click(timeout=8000)
         clicked = True
-    except Exception:
+    except Exception as exc:
+        diag["click_error"] = str(exc)[:300]
         clicked = await extractor.click_button_by_text("Solicitar") or await extractor.click_button_by_text("Easy Apply")
     if not clicked:
-        return {"ok": False, "reason": "apply button not clickable"}
+        try:
+            diag["dialogs"] = await page.locator(_DIALOG).count()
+        except Exception:
+            pass
+        return {"ok": False, "reason": "apply button not clickable", "diagnostics": diag}
     await page.wait_for_timeout(2500)
     if await page.locator(_DIALOG).count() == 0:
         return {"ok": False, "reason": "apply modal did not open"}
