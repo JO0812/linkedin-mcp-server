@@ -37,7 +37,7 @@ from linkedin_mcp_server.error_handler import raise_tool_error
 
 logger = logging.getLogger(__name__)
 
-TOOL_BUILD = "2026-09-14.5"
+TOOL_BUILD = "2026-09-14.6"
 
 _WALK: list[dict[str, Any]] = []
 
@@ -93,21 +93,21 @@ _EASY_APPLY_RE = re.compile(r"solicitud sencilla|easy apply", re.I)
 # identity signal here (aria-label VALUES are also locale-dependent), so
 # matching its label text is the only option. Exact-anchored on purpose.
 # New locales = extend this table.
-_NEXT_STEP_LABELS = re.compile(r"^(Siguiente|Next|Continuar|Continue)$", re.I)
+_NEXT_STEP_LABELS = re.compile(r"^\s*(Siguiente|Next|Continuar|Continue)\s*$", re.I)
 
 # Per-locale text table (documented exception to the locale-independence
 # rule): the Review stepper button has no locale-independent identity
 # signal here (aria-label VALUES are also locale-dependent), so matching
 # its label text is the only option. Exact-anchored on purpose.
 # New locales = extend this table.
-_REVIEW_LABELS = re.compile(r"^(Revisar|Review)$", re.I)
+_REVIEW_LABELS = re.compile(r"^\s*(Revisar|Review)\s*$", re.I)
 
 # Per-locale text table (documented exception to the locale-independence
 # rule): union of the Next/Continue and Review stepper buttons, used to
 # walk the form forward without submitting. Exact-anchored on purpose.
 # New locales = extend this table (via _NEXT_STEP_LABELS/_REVIEW_LABELS).
 _ADVANCE_LABELS = re.compile(
-    r"^(Siguiente|Next|Continuar|Continue|Revisar|Review)$", re.I
+    r"^\s*(Siguiente|Next|Continuar|Continue|Revisar|Review)\s*$", re.I
 )
 
 # Per-locale text table (documented exception to the locale-independence
@@ -116,7 +116,7 @@ _ADVANCE_LABELS = re.compile(
 # text is the only option. Exact-anchored on purpose.
 # New locales = extend this table.
 _SUBMIT_LABELS = re.compile(
-    r"^(Enviar solicitud|Submit application|Enviar|Submit)$", re.I
+    r"^\s*(Enviar solicitud|Submit application|Enviar|Submit)\s*$", re.I
 )
 
 # Per-locale text table (documented exception to the locale-independence
@@ -124,7 +124,7 @@ _SUBMIT_LABELS = re.compile(
 # no locale-independent identity signal here (aria-label VALUES are also
 # locale-dependent), so matching its label text is the only option.
 # Exact-anchored on purpose. New locales = extend this table.
-_DISCARD_LABELS = re.compile(r"^Descartar$|^Discard$", re.I)
+_DISCARD_LABELS = re.compile(r"^\s*Descartar\s*$|^\s*Discard\s*$", re.I)
 
 # Form-field tokens for _looks_like_apply_form (documented exception to the
 # locale-independence rule, same rationale as the tables above). These must
