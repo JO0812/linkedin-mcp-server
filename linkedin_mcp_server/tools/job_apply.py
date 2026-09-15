@@ -37,10 +37,11 @@ from linkedin_mcp_server.error_handler import raise_tool_error
 
 logger = logging.getLogger(__name__)
 
-TOOL_BUILD = "2026-09-14.16"
+TOOL_BUILD = "2026-09-14.17"
 
 _WALK: list[dict[str, Any]] = []
 _WALK_JOB = ""
+_RADIO_DEBUG: dict[str, Any] = {}
 
 SCREENSHOT_DIR = os.environ.get("LINKEDIN_MCP_APPLY_SCREENSHOT_DIR", "")
 
@@ -822,10 +823,13 @@ async def _fill_field(
         # Option labels use the extraction-time logic (label[for]/wrap/value),
         # NOT _resolve_control_label (which returns the group question text).
         if radio_name:
+            global _RADIO_DEBUG
+            _RADIO_DEBUG = {"name": radio_name}
             try:
                 group = dlg.locator(
                     f"input[type='radio'][name='{radio_name}']")
                 m = await group.count()
+                _RADIO_DEBUG["count"] = m
                 try:
                     opt_labels = await group.evaluate_all(
                         """els => els.map(e => {
@@ -837,6 +841,13 @@ async def _fill_field(
                         })""")
                 except Exception:
                     opt_labels = []
+                _RADIO_DEBUG["opt_labels"] = opt_labels
+                try:
+                    attrs = await group.evaluate_all(
+                        "els => els.map(e => ({id: e.getAttribute('id'), aria: e.getAttribute('aria-label'), val: e.value, checked: e.checked}))")
+                    _RADIO_DEBUG["attrs"] = attrs
+                except Exception as exc:
+                    _RADIO_DEBUG["attrs_error"] = str(exc)[:150]
                 for j in range(m):
                     try:
                         olab = _norm(opt_labels[j] if j < len(opt_labels) else "")
@@ -845,8 +856,8 @@ async def _fill_field(
                             return True
                     except Exception:
                         continue
-            except Exception:
-                pass
+            except Exception as exc:
+                _RADIO_DEBUG["error"] = str(exc)[:200]
             return False
         # File upload (CV).
         if cv_path and label == "__cv__":
@@ -1187,6 +1198,7 @@ def register_apply_tools(
                     missing_required=missing_required,
                     failed_fields=failed,
                     filled_ok=filled,
+                    radio_debug=_RADIO_DEBUG,
                 )
                 _log_apply(attempt)
                 return attempt
