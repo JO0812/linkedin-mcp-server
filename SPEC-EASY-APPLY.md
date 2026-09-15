@@ -93,7 +93,11 @@ Also done: fork created under `JO0812`, local remote → fork, `main` force-sync
 4. **Diagnostics are the debugger.** There is no interactive browser; every failure theory must be answered by data returned in `diagnostics`.
 5. **One canonical checkout.** All edits, commits, and pushes come from `/home/jo/repo/linkedin-mcp-server`. The `~/apps/linkedin-mcp-apply` copy and the uv-tool venv are read-only consumers; a change made anywhere else will be silently overwritten by the next push from canonical.
 
-## 8. Current blocker (with evidence, req `4467280735` WorkCapIT)
+## 8. Breakthrough 2026-09-14 (~21:20) — step 1 works E2E (req `4466135349` Stefanini)
+
+Root cause of all prior failures: LinkedIn renders several `role="dialog"` elements and the global-search typeahead popover (`data-testid="popover-floating"`, inert) comes first in DOM order — every tool scoped to `.first` operated on the popup, never on the Easy Apply modal. Fix (`TOOL_BUILD 2026-09-14.4`): `_apply_modal()` picks the dialog whose text matches apply-form tokens; `_extract_questions()` rewritten control-first (inputs/selects/textareas + `aria-label` / `<label for>` / row-text label resolution) since LinkedIn renders fields without `<label>` elements. First live draft returned 3 questions with profile-proposed answers + `current` values + full select options.
+
+## 9. Former blocker (resolved; evidence kept for reference, req `4467280735` WorkCapIT)
 
 `prepare_application` returns `cannot_prepare / apply button not clickable`. Latest diagnostics:
 
@@ -108,7 +112,7 @@ Leading hypotheses (ordered):
 3. **Lazy render** — job card renders after `domcontentloaded`; wait for a card selector + scroll card into view before matching.
 4. **Partial-DOM bot mitigation** — read path (`scrape_job` full text incl. "Solicitud sencilla") works, but interactive controls differ. Cross-check via screenshot/HTML dump tool if needed.
 
-## 9. Next steps (ordered)
+## 10. Next steps (ordered)
 
 1. **Fix button discovery** (§8): card-scoped locator + `aria-label` matching + Escape-first + full-list dump; bump `TOOL_BUILD`; deploy via §7 procedure (push → force-reinstall → grep-verify → pkill `[l]` → reconnect → retry `prepare_application(4467280735)`).
 2. **Validate step 1 E2E** on req `4467280735`: expect `draft_ready` with real screening questions + proposed answers (years → 3, constrained → NEEDS_USER). User reviews/edits the draft.
@@ -116,7 +120,7 @@ Leading hypotheses (ordered):
 4. **Harden + upstream-sync**: resolve `TODO`s (PyYAML dep declaration, `TOOL_BUILD` constant, screenshot-on-failure flag), keep `main` rebased on upstream periodically (`git fetch upstream; git rebase`), never force-push blindly once others consume the fork.
 5. **Optional upstream PR**: the two tools are self-contained in `tools/job_apply.py` + 2 lines in `server.py`; PR-able upstream if desired (note: upstream may reject automation that violates LinkedIn ToS — keep the fork as the delivery vehicle regardless).
 
-## 10. Test plan
+## 11. Test plan
 
 - [ ] `prepare_application("4467280735")` → `draft_ready`, questions ≥ 1, modal closed, `submitted: False`, no log side effects beyond attempt log
 - [ ] `prepare_application("<external-ATS req>")` → `cannot_prepare` with reason, no clicks
