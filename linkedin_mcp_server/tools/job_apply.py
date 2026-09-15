@@ -37,7 +37,7 @@ from linkedin_mcp_server.error_handler import raise_tool_error
 
 logger = logging.getLogger(__name__)
 
-TOOL_BUILD = "2026-09-14.11"
+TOOL_BUILD = "2026-09-14.12"
 
 _WALK: list[dict[str, Any]] = []
 _WALK_JOB = ""
@@ -786,23 +786,16 @@ async def _extract_questions(
 async def _fill_field(
     page: Any, label: str, value: str, cv_path: str | None = None
 ) -> bool:
-    """Fill one field matched by its label. Returns success."""
+    """Fill one field matched by its label. Returns success.
+
+    Control-first: iterate the current step's controls, resolve each
+    control's label exactly like _extract_questions does, and act on the
+    matching control directly. No ancestor/row guessing.
+    """
     dlg = await _apply_modal(page)
     if dlg is None:
         return False
     try:
-        # Direct hit: control whose aria-label equals the question label.
-        direct = dlg.locator(f"[aria-label='{label}']").first
-        try:
-            if await direct.count() > 0:
-                tag = await direct.evaluate("el => el.tagName.toLowerCase()")
-                if tag == "select":
-                    await direct.select_option(label=value, timeout=5000)
-                    return True
-                await direct.fill(value, timeout=5000)
-                return True
-        except Exception:
-            pass
         # File upload (CV).
         if cv_path and label == "__cv__":
             inp = dlg.locator("input[type='file']").first
@@ -810,41 +803,58 @@ async def _fill_field(
                 await inp.set_input_files(cv_path, timeout=15000)
                 return True
             return False
-        # Locate the form row containing the label text.
-        row = (
-            dlg.locator("div, fieldset")
-            .filter(has_text=re.compile(re.escape(label[:40])))
-            .first
-        )
-        sel = row.locator("select").first
-        if await sel.count() > 0:
-            await sel.select_option(label=value, timeout=5000)
-            return True
-        radios = row.locator("input[type='radio']")
-        if await radios.count() > 0:
-            opt = (
-                row.locator("label")
-                .filter(has_text=re.compile(rf"^{re.escape(value)}$"))
-                .first
-            )
-            if await opt.count() > 0:
-                await opt.click(timeout=5000)
-                return True
+        want = _norm(label)
+        try:
+            controls = dlg.locator("input, select, textarea")
+            n = await controls.count()
+        except Exception:
             return False
-        chk = row.locator("input[type='checkbox']").first
-        if await chk.count() > 0:
-            want = _norm(value) in ("true", "yes", "sí", "si", "on", "1", "marcar", "marcarla")
+        for i in range(n):
             try:
-                is_on = await chk.is_checked()
+                c = controls.nth(i)
+                clab = _norm(await _resolve_control_label(dlg, c))
+                if clab != want:
+                    continue
+                tag = await c.evaluate("el => el.tagName.toLowerCase()")
+                itype = ((await c.get_attribute("type")) or "").lower()
+                if tag == "select":
+                    await c.select_option(label=value, timeout=8000)
+                    return True
+                if itype == "checkbox":
+                    want_on = _norm(value) in (
+                        "true", "yes", "sí", "si", "on", "1",
+                        "marcar", "marcarla",
+                    )
+                    try:
+                        is_on = await c.is_checked()
+                    except Exception:
+                        is_on = False
+                    if want_on != is_on:
+                        await c.click(timeout=5000)
+                    return True
+                if itype == "radio":
+                    # Click the option whose label matches the value.
+                    name = (await c.get_attribute("name")) or ""
+                    group = dlg.locator(
+                        f"input[type='radio'][name='{name}']") if name else controls
+                    try:
+                        m = await group.count()
+                    except Exception:
+                        m = 0
+                    for j in range(m):
+                        try:
+                            opt = group.nth(j)
+                            olab = _norm(await _resolve_control_label(dlg, opt))
+                            if _norm(value) in olab or olab in _norm(value):
+                                await opt.click(timeout=5000)
+                                return True
+                        except Exception:
+                            continue
+                    return False
+                await c.fill(value, timeout=8000)
+                return True
             except Exception:
-                is_on = False
-            if want != is_on:
-                await chk.click(timeout=5000)
-            return True
-        txt = row.locator("input[type='text'], input:not([type]), textarea").first
-        if await txt.count() > 0:
-            await txt.fill(value, timeout=5000)
-            return True
+                continue
     except Exception as exc:
         logger.warning("fill failed for %r: %s", label, exc)
     return False
@@ -1071,6 +1081,8 @@ def register_apply_tools(
                     pass
                 step_qs, _w = await _extract_questions(page, job_id, advance=False)
                 for q in step_qs:
+                    if q["label"] in filled:
+                        continue  # already filled on a previous loop pass
                     qlab = _norm(q["label"])
                     if qlab in approved:
                         ok = await _fill_field(page, q["label"], approved[qlab])
@@ -1080,6 +1092,7 @@ def register_apply_tools(
                 if cv_path and not cv_done:
                     if await _fill_field(page, "__cv__", "", cv_path):
                         cv_done = True
+                        filled.append("__cv_uploaded__")
                 try:
                     before = (await modal.inner_text(timeout=4000))[:200]
                 except Exception:
