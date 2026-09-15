@@ -37,7 +37,7 @@ from linkedin_mcp_server.error_handler import raise_tool_error
 
 logger = logging.getLogger(__name__)
 
-TOOL_BUILD = "2026-09-14.12"
+TOOL_BUILD = "2026-09-14.13"
 
 _WALK: list[dict[str, Any]] = []
 _WALK_JOB = ""
@@ -317,6 +317,14 @@ def _propose_answer(
     def hit(*keys: str) -> bool:
         return any(k in lab for k in keys)
 
+    if qtype in ("select", "radio") and options:
+        norm_opts = {
+            _norm(o) for o in options
+            if o and _norm(o) not in ("selecciona una opción", "select an option", "")
+        }
+        if norm_opts and norm_opts <= {"yes", "no", "sí", "si"}:
+            return {"value": None, "source": None, "needs_user": True,
+                    "reason": "yes/no question — user must confirm"}
     is_contact = hit(
         "phone", "teléfono", "telefono", "móvil", "movil", "celular",
         "email", "correo", "location", "ubicaci", "city", "ciudad",
@@ -348,9 +356,12 @@ def _propose_answer(
     if hit(
         "salary",
         "salario",
+        "salarial",
         "renta",
         "pretension",
         "pretensión",
+        "expectativa",
+        "aspiraci",
         "compensation",
         "expected pay",
     ):
