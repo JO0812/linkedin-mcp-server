@@ -707,6 +707,18 @@ def register_apply_tools(
             page = extractor._page
             questions = await _extract_questions(page)
             inv = await _modal_inventory(page) if not questions else {}
+            if not questions:
+                try:
+                    inv["screenshot"] = f"/tmp/apply-{job_id}.png"
+                    await page.screenshot(path=inv["screenshot"])
+                except Exception as exc:
+                    inv["screenshot_error"] = str(exc)[:200]
+                try:
+                    html = await page.locator(_DIALOG).first.evaluate(
+                        "el => el.outerHTML.slice(0, 2000)")
+                    inv["dialog_html"] = html
+                except Exception as exc:
+                    inv["html_error"] = str(exc)[:200]
             await _close_modal(page)
             profile = _load_profile()
             draft = []
