@@ -37,7 +37,7 @@ from linkedin_mcp_server.error_handler import raise_tool_error
 
 logger = logging.getLogger(__name__)
 
-TOOL_BUILD = "2026-09-14.8"
+TOOL_BUILD = "2026-09-14.9"
 
 _WALK: list[dict[str, Any]] = []
 _WALK_JOB = ""
@@ -556,6 +556,24 @@ async def _open_easy_apply(extractor: Any, job_id: str) -> dict[str, Any]:
         diag = await _apply_failure_diag(
             page, job_id, open_dialog_text, click_error, dialog_still_open
         )
+        try:
+            diag["screenshot"] = f"/tmp/apply-{job_id}-no-modal.png"
+            await page.screenshot(path=diag["screenshot"])
+        except Exception as exc:
+            diag["screenshot_error"] = str(exc)[:200]
+        try:
+            wide = page.locator("button, a").filter(
+                has_text=_APPLY_BUTTON_LABELS)
+            diag["pagewide_count"] = await wide.count()
+            wt = []
+            for i in range(min(await wide.count(), 10)):
+                try:
+                    wt.append((await wide.nth(i).inner_text())[:80])
+                except Exception:
+                    pass
+            diag["pagewide_texts"] = wt
+        except Exception as exc:
+            diag["pagewide_error"] = str(exc)[:200]
         return {"ok": False, "reason": "apply modal did not open", "diagnostics": diag}
     return {"ok": True}
 
