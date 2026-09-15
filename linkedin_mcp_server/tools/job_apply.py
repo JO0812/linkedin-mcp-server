@@ -37,9 +37,10 @@ from linkedin_mcp_server.error_handler import raise_tool_error
 
 logger = logging.getLogger(__name__)
 
-TOOL_BUILD = "2026-09-14.6"
+TOOL_BUILD = "2026-09-14.7"
 
 _WALK: list[dict[str, Any]] = []
+_WALK_JOB = ""
 
 SCREENSHOT_DIR = os.environ.get("LINKEDIN_MCP_APPLY_SCREENSHOT_DIR", "")
 
@@ -625,13 +626,17 @@ async def _resolve_control_label(dlg: Any, c: Any) -> str:
         return ""
 
 
-async def _extract_questions(page: Any) -> list[dict[str, Any]]:
+async def _extract_questions(
+    page: Any, job_id: str = ""
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Read every question in the Easy Apply modal (all steps).
 
     Control-first discovery: LinkedIn renders fields without <label>
     elements, so we iterate inputs/selects/textareas and resolve each
     control's visible label (aria-label, <label for>, else row text).
     """
+    global _WALK_JOB
+    _WALK_JOB = job_id
     questions: list[dict[str, Any]] = []
     seen_steps = 0
     while seen_steps < 6:
@@ -668,9 +673,15 @@ async def _extract_questions(page: Any) -> list[dict[str, Any]]:
                         if name else dlg.locator("input[type='radio']")
                     qtype = "radio"
                     try:
-                        vals = await group.evaluate_all(
-                            "els => els.map(e => (e.value || e.getAttribute('aria-label') || '').trim())")
-                        options = [v for v in vals if v]
+                        options = await group.evaluate_all(
+                            """els => els.map(e => {
+                              const id = e.getAttribute('id');
+                              const lab = id ? document.querySelector(`label[for="${id}"]`) : null;
+                              const wrap = e.closest('label');
+                              const t = (lab ? lab.innerText : (wrap ? wrap.innerText : '')) || '';
+                              return (t.split('\\n')[0] || e.value || '').trim().slice(0, 120);
+                            })""")
+                        options = [o for o in options if o]
                     except Exception:
                         options = []
                     # One entry per radio group, not per button.
@@ -713,11 +724,24 @@ async def _extract_questions(page: Any) -> list[dict[str, Any]]:
                     await page.wait_for_timeout(1500)
                     step_info["next_clicked"] = True
                     try:
+                        shot = f"/tmp/apply-{_WALK_JOB}-step{seen_steps + 1}.png"
+                        await page.screenshot(path=shot)
+                        step_info["screenshot"] = shot
+                    except Exception as exc:
+                        step_info["shot_error"] = str(exc)[:150]
+                    try:
                         after = await _apply_modal(page)
-                        step_info["after"] = (
-                            (await after.inner_text(timeout=4000))[:200]
-                            if after is not None else "<modal-gone>"
-                        )
+                        if after is not None:
+                            step_info["after"] = (
+                                await after.inner_text(timeout=4000))[:200]
+                        else:
+                            step_info["after"] = "<modal-gone>"
+                            try:
+                                raw = await page.locator(_DIALOG).evaluate_all(
+                                    "els => els.map(e => (e.innerText || '').slice(0, 200))")
+                                step_info["all_dialogs"] = raw
+                            except Exception as exc2:
+                                step_info["all_dialogs_error"] = str(exc2)[:150]
                     except Exception as exc:
                         step_info["after_error"] = str(exc)[:150]
                     seen_steps += 1
@@ -832,7 +856,7 @@ def register_apply_tools(
                 )
                 return {"job_id": job_id, "status": "cannot_prepare", **opened}
             page = extractor._page
-            questions, walk = await _extract_questions(page)
+            questions, walk = await _extract_questions(page, job_id)
             inv = await _modal_inventory(page) if not questions else {}
             inv["step_walk"] = walk
             if not questions:
@@ -969,7 +993,7 @@ def register_apply_tools(
                 _log_apply(attempt)
                 return attempt
             page = extractor._page
-            questions, _walk = await _extract_questions(page)
+            questions, _walk = await _extract_questions(page, job_id)
             by_label = {_norm(q["label"]): q for q in questions}
             filled, missing_required, failed = [], [], []
             for a in answers:
