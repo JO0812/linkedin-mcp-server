@@ -37,7 +37,7 @@ from linkedin_mcp_server.error_handler import raise_tool_error
 
 logger = logging.getLogger(__name__)
 
-TOOL_BUILD = "2026-09-14.1"
+TOOL_BUILD = "2026-09-14.3"
 
 SCREENSHOT_DIR = os.environ.get("LINKEDIN_MCP_APPLY_SCREENSHOT_DIR", "")
 
@@ -51,9 +51,19 @@ except Exception:  # fallback if upstream renames it
 
 # Per-locale text table (documented exception to the locale-independence
 # rule): the already-applied banner has no locale-independent signal here,
-# so matching its text is the only option. New locales = extend this table.
+# so matching its text is the only option. Every token is an ANCHORED
+# PHRASE on purpose: bare `solicitado`/`applied` matched applicant-insights
+# statistics ("N personas han solicitado este empleo" — third-person plural,
+# measured live on job 4467280735), so only whole second-person phrases
+# ("has solicitado", "ya solicitaste") or completion banners count as an
+# already-applied signal. New locales = extend this table. The
+# helper-verb phrasings ("has been sent", "was submitted") are needed
+# because the contiguous forms miss the real EN banner ("Your application
+# has been sent", measured by direct regex run).
 _APPLIED_RE = re.compile(
-    r"solicitado|applied|application sent|solicitud enviada|ya (te postulas|has postulado)",
+    r"has solicitado|ya solicitaste|solicitud enviada|application sent|application submitted|"
+    r"application has been sent|application was submitted|"
+    r"already applied|you applied|ya (te )?(has )?postulado",
     re.I,
 )
 
@@ -61,8 +71,14 @@ _APPLIED_RE = re.compile(
 # rule): the apply control has no locale-independent identity signal here
 # (no stable URL, and aria-label VALUES are also locale-dependent), so
 # matching its label text is the only option. Substring-style on purpose:
-# LinkedIn wraps the label in nested spans. New locales = extend this table.
-_APPLY_BUTTON_LABELS = re.compile(r"solicitar|easy apply|postularme|postular", re.I)
+# LinkedIn wraps the label in nested spans. The ES Easy Apply button is
+# measured to read "Solicitud sencilla" (live, job 4467280735 — as both
+# text and aria-label), which the old `solicitar` token never matched
+# ("solicitud sencilla" does not contain "solicitar"); `solicitar` is kept
+# for locales where the bare verb is the label. New locales = extend table.
+_APPLY_BUTTON_LABELS = re.compile(
+    r"solicitud sencilla|easy apply|solicitar|postularme|postular", re.I
+)
 
 # Per-locale text table (documented exception to the locale-independence
 # rule): the Easy Apply marker in the job body text has no
@@ -117,6 +133,17 @@ _DISCARD_LABELS = re.compile(r"^Descartar$|^Discard$", re.I)
 _APPLY_FORM_RE = re.compile(
     r"teléfono|telefono|años|anos|curriculum|currículum|adjuntar|correo|email"
     r"|experiencia|years of experience|resume|upload|nombre completo|full name",
+    re.I,
+)
+
+# Per-locale text table (documented exception to the locale-independence
+# rule): the post-submit confirmation has no locale-independent signal, so
+# matching its text is the only option. Helper verbs must be allowed
+# between "application" and "sent/submitted" or a successful EN submit
+# ("Your application has been sent") reads as uncertain.
+# New locales = extend this table.
+_SENT_CONFIRMATION_RE = re.compile(
+    r"solicitud enviada|application (has been |was )?(sent|submitted)|se ha enviado",
     re.I,
 )
 
@@ -830,13 +857,9 @@ def register_apply_tools(
                 _log_apply(attempt)
                 return attempt
             body = await page.evaluate("() => document.body?.innerText || ''")
-            sent = bool(
-                re.search(
-                    r"solicitud enviada|application (sent|submitted)|se ha enviado",
-                    body,
-                    re.I,
-                )
-            )
+            # Helper verbs must be allowed between "application" and
+            # "sent/submitted" or a successful EN submit reads as uncertain.
+            sent = bool(_SENT_CONFIRMATION_RE.search(body))
             await _close_modal(page)
             attempt.update(
                 status="submitted" if sent else "uncertain",

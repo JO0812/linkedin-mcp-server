@@ -4,9 +4,8 @@ No network, no real browser, no LinkedIn. The page/extractor fakes below
 imitate only OUR selector/walk logic (which locator strings the code reads
 and which awaited methods it calls), never LinkedIn's markup.
 
-Spec case map (see task): 1-4 form detection, 5-17 answer proposals
-(case 10 skipped: no rule matches that label — see test), 18-21 submit
-gates, 22-24 prepare, 25-30 modal discovery, 31-32 apply log,
+Spec case map (see task): 1-4 form detection, 5-17 answer proposals,
+18-21 submit gates, 22-24 prepare, 25-30 modal discovery, 31-32 apply log,
 33-35 registration, 36 TOOL_BUILD.
 """
 
@@ -578,10 +577,7 @@ class TestProposeAnswer:
         assert out["needs_user"] is False
         assert out["source"] == "profile"
 
-    # Case 10 ("¿Cuándo puedes comenzar?" + notice_statement) is SKIPPED:
-    # no _propose_answer rule matches that label (verified: it returns
-    # NEEDS_USER "no profile fact covers this"), so asserting the statement
-    # would force a fake test. The notice rule matches e.g. "disponibilidad".
+    # Case 10 covered by test_notice_es_phrase (keyword table fixed to match "¿Cuándo puedes comenzar?").
 
     def test_notice_es_phrase(self) -> None:
         profile = {"notice_statement": "30 días de preaviso; disponibilidad inmediata"}
@@ -898,6 +894,83 @@ class TestOpenEasyApply:
         out = await ja._open_easy_apply(_FakeExtractor(page), "123")
         assert out["ok"] is False
         assert "Easy Apply" in out["reason"]
+
+    async def test_applied_regex_ignores_applicant_stats(self) -> None:
+        # Live regression (job 4467280735): the applicant-insights stats
+        # ("N personas han solicitado este empleo", third-person plural)
+        # must NOT abort as already-applied; the old bare `solicitado`
+        # token substring-matched it.
+        page = _FakePage(
+            body=(
+                "Ingeniero de software. Solicitud sencilla. "
+                "El 100 % Sin experiencia de personas con nivel "
+                "Sin experiencia han solicitado este empleo. "
+                "37 solicitados."
+            ),
+            buttons=[_El(text="Nav item", role="button")],
+        )
+        out = await ja._open_easy_apply(_FakeExtractor(page), "123")
+        assert out.get("reason") != "already applied to this job"
+
+    async def test_spanish_easy_apply_button_discovered(self) -> None:
+        # Live regression (job 4467280735): the ES Easy Apply button reads
+        # "Solicitud sencilla" as both text and aria-label; the old
+        # `solicitar` token never matched it.
+        page = _FakePage(body="Ingeniero de software. Solicitud sencilla.")
+        btn = _apply_button(page, text="Solicitud sencilla", aria="Solicitud sencilla")
+        page._main_buttons.append(btn)
+        out = await ja._open_easy_apply(_FakeExtractor(page), "123")
+        assert out == {"ok": True}
+        assert btn.clicked is True
+
+
+class TestAppliedRegex:
+    def test_ignores_third_person_stats_es(self) -> None:
+        assert (
+            ja._APPLIED_RE.search("Sin experiencia han solicitado este empleo") is None
+        )
+
+    def test_ignores_third_person_stats_en(self) -> None:
+        assert (
+            ja._APPLIED_RE.search("You're among the 37 applicants who applied") is None
+        )
+
+    def test_second_person_still_matches(self) -> None:
+        assert ja._APPLIED_RE.search("Ya has solicitado este empleo.") is not None
+
+    def test_helper_verb_banner_sent(self) -> None:
+        # Real EN banner inserts a helper verb the contiguous form misses.
+        assert ja._APPLIED_RE.search("Your application has been sent") is not None
+
+    def test_helper_verb_banner_submitted(self) -> None:
+        assert ja._APPLIED_RE.search("Your application was submitted") is not None
+
+    def test_already_applied_for_this_job(self) -> None:
+        assert ja._APPLIED_RE.search("You've already applied for this job") is not None
+
+    def test_ignores_applicant_stats_en_negative(self) -> None:
+        # Honest negative (verified by direct regex run): "have applied" and
+        # "applied for" appear, but none of the anchored phrases do.
+        assert ja._APPLIED_RE.search("applicants have applied for this job") is None
+
+
+class TestSentConfirmationRegex:
+    def test_helper_verb_sent(self) -> None:
+        assert (
+            ja._SENT_CONFIRMATION_RE.search("Your application has been sent")
+            is not None
+        )
+
+    def test_solicitud_enviada(self) -> None:
+        assert ja._SENT_CONFIRMATION_RE.search("Solicitud enviada") is not None
+
+    def test_se_ha_enviado(self) -> None:
+        assert ja._SENT_CONFIRMATION_RE.search("se ha enviado tu solicitud") is not None
+
+    def test_ignores_applicant_stats(self) -> None:
+        # Honest negative (verified by direct regex run): applicant-count
+        # text carries "applied" but no confirmation phrase.
+        assert ja._SENT_CONFIRMATION_RE.search("37 applicants applied") is None
 
 
 class TestLogApply:
