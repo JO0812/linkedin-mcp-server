@@ -37,7 +37,7 @@ from linkedin_mcp_server.error_handler import raise_tool_error
 
 logger = logging.getLogger(__name__)
 
-TOOL_BUILD = "2026-09-14.14"
+TOOL_BUILD = "2026-09-14.15"
 
 _WALK: list[dict[str, Any]] = []
 _WALK_JOB = ""
@@ -721,6 +721,16 @@ async def _extract_questions(
                     # One entry per radio group, not per button.
                     if any(q.get("radio_name") == name for q in questions):
                         continue
+                    # Group label: the question text lives in the container,
+                    # not on the buttons (which resolve to bare Yes/No).
+                    try:
+                        gtext = await group.first.evaluate(
+                            "el => { const n = el.closest('fieldset') || el.closest('div');"
+                            " return ((n ? n.innerText : '') || '').split('\\n').map(s => s.trim()).filter(s => s && !/^(yes|no|s[ií]|obligatorio|required|\*)$/i.test(s))[0] || ''; }")
+                        if gtext and len(gtext) > len(label):
+                            label = gtext[:160]
+                    except Exception:
+                        pass
                 try:
                     req = await c.get_attribute("aria-required")
                 except Exception:
@@ -795,7 +805,8 @@ async def _extract_questions(
 
 
 async def _fill_field(
-    page: Any, label: str, value: str, cv_path: str | None = None
+    page: Any, label: str, value: str, cv_path: str | None = None,
+    radio_name: str = "",
 ) -> bool:
     """Fill one field matched by its label. Returns success.
 
@@ -807,6 +818,24 @@ async def _fill_field(
     if dlg is None:
         return False
     try:
+        # Radio group by name: pick the option matching the value.
+        if radio_name:
+            try:
+                group = dlg.locator(
+                    f"input[type='radio'][name='{radio_name}']")
+                m = await group.count()
+                for j in range(m):
+                    try:
+                        opt = group.nth(j)
+                        olab = _norm(await _resolve_control_label(dlg, opt))
+                        if _norm(value) == olab or _norm(value) in olab:
+                            await opt.click(timeout=5000)
+                            return True
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            return False
         # File upload (CV).
         if cv_path and label == "__cv__":
             inp = dlg.locator("input[type='file']").first
@@ -1098,7 +1127,9 @@ def register_apply_tools(
                         continue  # already filled on a previous loop pass
                     qlab = _norm(q["label"])
                     if qlab in approved:
-                        ok = await _fill_field(page, q["label"], approved[qlab])
+                        ok = await _fill_field(
+                            page, q["label"], approved[qlab],
+                            None, q.get("radio_name", ""))
                         (filled if ok else failed).append(q["label"])
                     elif q["required"] and q["label"] not in missing_required:
                         missing_required.append(q["label"])
