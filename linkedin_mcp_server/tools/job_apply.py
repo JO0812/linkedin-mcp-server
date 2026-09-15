@@ -37,7 +37,7 @@ from linkedin_mcp_server.error_handler import raise_tool_error
 
 logger = logging.getLogger(__name__)
 
-TOOL_BUILD = "2026-09-14.9"
+TOOL_BUILD = "2026-09-14.10"
 
 _WALK: list[dict[str, Any]] = []
 _WALK_JOB = ""
@@ -827,6 +827,16 @@ async def _fill_field(
                 await opt.click(timeout=5000)
                 return True
             return False
+        chk = row.locator("input[type='checkbox']").first
+        if await chk.count() > 0:
+            want = _norm(value) in ("true", "yes", "sí", "si", "on", "1", "marcar", "marcarla")
+            try:
+                is_on = await chk.is_checked()
+            except Exception:
+                is_on = False
+            if want != is_on:
+                await chk.click(timeout=5000)
+            return True
         txt = row.locator("input[type='text'], input:not([type]), textarea").first
         if await txt.count() > 0:
             await txt.fill(value, timeout=5000)
@@ -974,21 +984,41 @@ def register_apply_tools(
         confirm_send: Annotated[
             bool,
             Field(
-                description="MUST be true. Any other value aborts without touching the page."
+                description="MUST be true to submit. Any other value aborts without touching the page (unless preview_only)."
             ),
         ],
         ctx: Context,
         extractor: Any | None = None,
+        preview_only: Annotated[
+            bool,
+            Field(
+                description="When true: fill + walk to Review, capture review text+screenshot, close WITHOUT submitting. confirm_send must be false."
+            ),
+        ] = False,
     ) -> dict[str, Any]:
         """
         STEP 2 (consulted, gated). Fill ONLY the user-approved answers,
         attach the user-approved CV, walk Review, and click Submit — but
-        ONLY when confirm_send is True. Refuses on: confirm_send falsy,
+        ONLY when confirm_send is True (and preview_only is False).
+        With preview_only=True (and confirm_send=False): fill, walk to the
+        Review screen, capture its text + screenshot, close without
+        submitting, return review_ready. Refuses on: contradictory flags,
         external (non-Easy-Apply) postings, unanswered required questions,
         or any fill failure. Logs every attempt locally.
         """
-        attempt: dict[str, Any] = {"job_id": job_id, "confirm_send": bool(confirm_send)}
-        if not confirm_send:
+        attempt: dict[str, Any] = {
+            "job_id": job_id,
+            "confirm_send": bool(confirm_send),
+            "preview_only": bool(preview_only),
+        }
+        if preview_only and confirm_send:
+            attempt.update(
+                status="aborted",
+                reason="contradictory flags: preview_only + confirm_send — pick one",
+            )
+            _log_apply(attempt)
+            return attempt
+        if not preview_only and not confirm_send:
             attempt.update(
                 status="aborted", reason="confirm_send is not True — refusing to submit"
             )
@@ -1061,6 +1091,27 @@ def register_apply_tools(
                     await page.wait_for_timeout(1500)
                 except Exception:
                     break
+            if preview_only:
+                try:
+                    review_text = (await dlg.inner_text(timeout=5000))[:2000]
+                except Exception:
+                    review_text = "<unreadable>"
+                shot_path = f"/tmp/apply-{job_id}-review.png"
+                try:
+                    await page.screenshot(path=shot_path)
+                except Exception:
+                    shot_path = "<shot-failed>"
+                await _close_modal(page)
+                attempt.update(
+                    status="review_ready",
+                    filled_ok=filled,
+                    cv_attached=bool(cv_path),
+                    review_text=review_text,
+                    review_screenshot=shot_path,
+                )
+                _log_apply(attempt)
+                await ctx.report_progress(progress=100, total=100, message="review captured")
+                return attempt
             send = dlg.locator("button").filter(has_text=_SUBMIT_LABELS).first
             try:
                 if await send.count() == 0 or not await send.is_enabled():
