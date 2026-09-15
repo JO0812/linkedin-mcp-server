@@ -37,7 +37,7 @@ from linkedin_mcp_server.error_handler import raise_tool_error
 
 logger = logging.getLogger(__name__)
 
-TOOL_BUILD = "2026-09-14.7"
+TOOL_BUILD = "2026-09-14.8"
 
 _WALK: list[dict[str, Any]] = []
 _WALK_JOB = ""
@@ -135,7 +135,12 @@ _DISCARD_LABELS = re.compile(r"^\s*Descartar\s*$|^\s*Discard\s*$", re.I)
 # extend this table.
 _APPLY_FORM_RE = re.compile(
     r"teléfono|telefono|años|anos|curriculum|currículum|adjuntar|correo|email"
-    r"|experiencia|years of experience|resume|upload|nombre completo|full name",
+    r"|experiencia|years of experience|resume|upload|nombre completo|full name"
+    # Modal-chrome tokens: every Easy Apply step carries the modal title
+    # ("Solicitar empleo en <company>") and interstitial/review steps
+    # (favorite-mark, review). The search popup carries none of these.
+    r"|solicitar empleo en|marcar esta vacante|revisar tu solicitud"
+    r"|review your application|easy apply step",
     re.I,
 )
 
