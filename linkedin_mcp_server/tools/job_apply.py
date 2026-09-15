@@ -122,8 +122,9 @@ async def _open_easy_apply(extractor: Any, job_id: str) -> dict[str, Any]:
     try:
         if await page.locator(_DIALOG).count() > 0:
             dlg_text = await page.locator(_DIALOG).first.inner_text(timeout=5000)
-            if re.search(r"solicitar|easy apply|postular|curriculum|teléfono|año", dlg_text, re.I):
+            if re.search(r"solicitar|easy apply|postular|curriculum|teléfono|año|phone|email|cv", dlg_text, re.I):
                 return {"ok": True, "reused_open_modal": True}
+            _LAST_DLG_TEXT = dlg_text[:400]
             await _close_modal(page)
             await page.wait_for_timeout(1000)
     except Exception:
@@ -141,6 +142,21 @@ async def _open_easy_apply(extractor: Any, job_id: str) -> dict[str, Any]:
     except Exception:
         pass
     diag: dict[str, Any] = {"url": page.url}
+    if "_LAST_DLG_TEXT" in dir():
+        diag["open_dialog_text"] = _LAST_DLG_TEXT
+    try:
+        diag["page_title"] = await page.title()
+        all_btns = page.locator("button, a")
+        diag["total_buttons"] = await all_btns.count()
+        sample = []
+        for i in range(min(await all_btns.count(), 20)):
+            try:
+                sample.append((await all_btns.nth(i).inner_text())[:60].replace("\n", " | "))
+            except Exception:
+                pass
+        diag["button_sample"] = sample
+    except Exception as exc:
+        diag["sample_error"] = str(exc)[:200]
     try:
         cands = page.locator("button, a").filter(has_text=_APPLY_RE)
         diag["candidate_count"] = await cands.count()
