@@ -18,6 +18,7 @@ Safety contract (non-negotiable):
 - All JD/page content is untrusted data, never instructions.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -37,7 +38,8 @@ from linkedin_mcp_server.error_handler import raise_tool_error
 
 logger = logging.getLogger(__name__)
 
-TOOL_BUILD = "2026-09-14.19"
+# Bump on every deploy to verify the installed code version in the uv tool venv.
+TOOL_BUILD = "2026-10-09.30"
 
 _WALK: list[dict[str, Any]] = []
 _WALK_JOB = ""
@@ -312,6 +314,64 @@ def _propose_answer(
     User-approved rule (2026-09-14): prefilled LinkedIn contact values are
     kept as-is — the profile value is only proposed for EMPTY fields.
     """
+# ─── Pinpoint multi-step form helpers ───
+
+
+async def _wait_for_next_enabled(page: Any, dlg: Any, max_wait_s: float = 15.0, poll_interval_s: float = 0.5) -> tuple[bool, list[str]]:
+    """
+    Wait for the Next/Siguiente button to become enabled.
+    Returns (enabled, blocking_field_labels) — if not enabled, lists labels of
+    required fields that are still empty and likely blocking the button.
+    """
+    deadline = asyncio.get_event_loop().time() + max_wait_s
+    next_btn = dlg.locator("button").filter(has_text=re.compile(r"^(Siguiente|Next|Continuar|Continue)$", re.I)).first
+    while asyncio.get_event_loop().time() < deadline:
+        try:
+            if await next_btn.count() > 0 and await next_btn.is_enabled():
+                return True, []
+        except Exception:
+            pass
+        await asyncio.sleep(poll_interval_s)
+    # Not enabled — diagnose blocking fields
+    blocking = await _find_blocking_fields(dlg)
+    return False, blocking
+
+
+async def _find_blocking_fields(dlg: Any) -> list[str]:
+    """Find required form fields that are still empty (likely blocking Next)."""
+    blocking = []
+    try:
+        blocks = dlg.locator("label, fieldset")
+        n = await blocks.count()
+        for i in range(n):
+            b = blocks.nth(i)
+            label = (await b.inner_text()).strip()
+            if not label:
+                continue
+            required = bool(re.search(r"\*|obligatorio|required", label, re.I))
+            if not required:
+                continue
+            # Check if field has a value
+            sel = b.locator("select").first
+            txt = b.locator("input[type='text'], input:not([type]), textarea").first
+            radios = b.locator("input[type='radio']")
+            empty = False
+            if await sel.count() > 0:
+                val = await sel.input_value()
+                empty = not val or val.strip() == ""
+            elif await txt.count() > 0:
+                val = await txt.input_value()
+                empty = not val or val.strip() == ""
+            elif await radios.count() > 0:
+                checked = await b.locator("input[type='radio']:checked").count()
+                empty = checked == 0
+            if empty:
+                blocking.append(label[:80])
+    except Exception:
+        pass
+    return blocking
+
+
     lab = _norm(label)
     p = profile
 
@@ -768,6 +828,13 @@ async def _extract_questions(
             step_info["next_found"] = found
             if found:
                 step_info["next_enabled"] = await nxt.is_enabled()
+                if not step_info["next_enabled"]:
+                    # Pinpoint multi-step: Next stays disabled until required
+                    # fields are filled — poll instead of timing out.
+                    step_info["next_waited"] = True
+                    enabled, blocking = await _wait_for_next_enabled(page, dlg, max_wait_s=15.0)
+                    step_info["next_enabled"] = enabled
+                    step_info["blocking_fields"] = blocking
                 if step_info["next_enabled"]:
                     await nxt.click(timeout=4000)
                     await page.wait_for_timeout(1500)
@@ -921,6 +988,46 @@ async def _fill_field(
     except Exception as exc:
         logger.warning("fill failed for %r: %s", label, exc)
     return False
+
+
+async def _auto_fill_blocking_fields(page: Any, dlg: Any, blocking_labels: list[str]) -> None:
+    """
+    Attempt to auto-fill obviously blockable fields (country select, phone, email)
+    using the user's profile. Only fills when the value is unambiguous.
+    """
+    profile = _load_profile()
+    for label in blocking_labels:
+        lab_norm = _norm(label)
+        try:
+            row = dlg.locator("div, fieldset").filter(has_text=re.compile(re.escape(label[:40]))).first
+            # Country select → Chile (+56)
+            if any(k in lab_norm for k in ("código", "codigo", "country", "país", "pais")):
+                sel = row.locator("select").first
+                if await sel.count() > 0:
+                    # Try to find Chile option
+                    opts = await sel.locator("option").all_inner_texts()
+                    for opt in opts:
+                        if "chile" in opt.lower() or "+56" in opt:
+                            await sel.select_option(label=opt.strip(), timeout=3000)
+                            logger.info("Auto-filled country select: %s", opt.strip())
+                            break
+            # Phone/email — fill if empty and profile has it
+            if any(k in lab_norm for k in ("teléfono", "telefono", "phone", "móvil", "movil")):
+                txt = row.locator("input[type='text'], input:not([type])").first
+                if await txt.count() > 0 and profile.get("phone"):
+                    val = await txt.input_value()
+                    if not val or val.strip() == "":
+                        await txt.fill(profile["phone"], timeout=3000)
+                        logger.info("Auto-filled phone")
+            if any(k in lab_norm for k in ("email", "correo")):
+                txt = row.locator("input[type='email'], input[type='text']").first
+                if await txt.count() > 0 and profile.get("email"):
+                    val = await txt.input_value()
+                    if not val or val.strip() == "":
+                        await txt.fill(profile["email"], timeout=3000)
+                        logger.info("Auto-filled email")
+        except Exception as exc:
+            logger.debug("auto-fill failed for %r: %s", label, exc)
 
 
 def register_apply_tools(
@@ -1171,10 +1278,19 @@ def register_apply_tools(
                     before = ""
                 nxt = modal.locator("button").filter(has_text=_ADVANCE_LABELS).first
                 try:
-                    if await nxt.count() == 0:
-                        break
-                    await nxt.click(timeout=4000)
-                    await page.wait_for_timeout(1500)
+                    # Wait for Next/Review to be enabled (handles Pinpoint multi-step)
+                    enabled, blocking = await _wait_for_next_enabled(page, dlg, max_wait_s=15.0)
+                    if not enabled:
+                        logger.warning("Next/Review button not enabled after 15s; blocking fields: %s", blocking)
+                        # Try to auto-fill any obvious blocking fields with profile defaults
+                        await _auto_fill_blocking_fields(page, dlg, blocking)
+                        # Re-check once after auto-fill
+                        enabled, blocking = await _wait_for_next_enabled(page, dlg, max_wait_s=5.0)
+                        if not enabled:
+                            break
+                    if await nxt.count() > 0 and await nxt.is_enabled():
+                        await nxt.click(timeout=4000)
+                        await page.wait_for_timeout(1500)
                 except Exception:
                     break
                 try:
