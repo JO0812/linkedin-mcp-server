@@ -39,11 +39,12 @@ from linkedin_mcp_server.error_handler import raise_tool_error
 logger = logging.getLogger(__name__)
 
 # Bump on every deploy to verify the installed code version in the uv tool venv.
-TOOL_BUILD = "2026-10-09.30"
+TOOL_BUILD = "2026-10-09.45"
 
 _WALK: list[dict[str, Any]] = []
 _WALK_JOB = ""
 _RADIO_DEBUG: dict[str, Any] = {}
+_FILL_CALLS: list[str] = []
 
 SCREENSHOT_DIR = os.environ.get("LINKEDIN_MCP_APPLY_SCREENSHOT_DIR", "")
 
@@ -314,64 +315,6 @@ def _propose_answer(
     User-approved rule (2026-09-14): prefilled LinkedIn contact values are
     kept as-is — the profile value is only proposed for EMPTY fields.
     """
-# ─── Pinpoint multi-step form helpers ───
-
-
-async def _wait_for_next_enabled(page: Any, dlg: Any, max_wait_s: float = 15.0, poll_interval_s: float = 0.5) -> tuple[bool, list[str]]:
-    """
-    Wait for the Next/Siguiente button to become enabled.
-    Returns (enabled, blocking_field_labels) — if not enabled, lists labels of
-    required fields that are still empty and likely blocking the button.
-    """
-    deadline = asyncio.get_event_loop().time() + max_wait_s
-    next_btn = dlg.locator("button").filter(has_text=re.compile(r"^(Siguiente|Next|Continuar|Continue)$", re.I)).first
-    while asyncio.get_event_loop().time() < deadline:
-        try:
-            if await next_btn.count() > 0 and await next_btn.is_enabled():
-                return True, []
-        except Exception:
-            pass
-        await asyncio.sleep(poll_interval_s)
-    # Not enabled — diagnose blocking fields
-    blocking = await _find_blocking_fields(dlg)
-    return False, blocking
-
-
-async def _find_blocking_fields(dlg: Any) -> list[str]:
-    """Find required form fields that are still empty (likely blocking Next)."""
-    blocking = []
-    try:
-        blocks = dlg.locator("label, fieldset")
-        n = await blocks.count()
-        for i in range(n):
-            b = blocks.nth(i)
-            label = (await b.inner_text()).strip()
-            if not label:
-                continue
-            required = bool(re.search(r"\*|obligatorio|required", label, re.I))
-            if not required:
-                continue
-            # Check if field has a value
-            sel = b.locator("select").first
-            txt = b.locator("input[type='text'], input:not([type]), textarea").first
-            radios = b.locator("input[type='radio']")
-            empty = False
-            if await sel.count() > 0:
-                val = await sel.input_value()
-                empty = not val or val.strip() == ""
-            elif await txt.count() > 0:
-                val = await txt.input_value()
-                empty = not val or val.strip() == ""
-            elif await radios.count() > 0:
-                checked = await b.locator("input[type='radio']:checked").count()
-                empty = checked == 0
-            if empty:
-                blocking.append(label[:80])
-    except Exception:
-        pass
-    return blocking
-
-
     lab = _norm(label)
     p = profile
 
@@ -496,6 +439,64 @@ async def _find_blocking_fields(dlg: Any) -> list[str]:
         "needs_user": True,
         "reason": "no profile fact covers this",
     }
+# ─── Pinpoint multi-step form helpers ───
+
+
+async def _wait_for_next_enabled(page: Any, dlg: Any, max_wait_s: float = 15.0, poll_interval_s: float = 0.5) -> tuple[bool, list[str]]:
+    """
+    Wait for the Next/Siguiente button to become enabled.
+    Returns (enabled, blocking_field_labels) — if not enabled, lists labels of
+    required fields that are still empty and likely blocking the button.
+    """
+    deadline = asyncio.get_event_loop().time() + max_wait_s
+    next_btn = dlg.locator("button").filter(has_text=re.compile(r"^(Siguiente|Next|Continuar|Continue)$", re.I)).first
+    while asyncio.get_event_loop().time() < deadline:
+        try:
+            if await next_btn.count() > 0 and await next_btn.is_enabled():
+                return True, []
+        except Exception:
+            pass
+        await asyncio.sleep(poll_interval_s)
+    # Not enabled — diagnose blocking fields
+    blocking = await _find_blocking_fields(dlg)
+    return False, blocking
+
+
+async def _find_blocking_fields(dlg: Any) -> list[str]:
+    """Find required form fields that are still empty (likely blocking Next)."""
+    blocking = []
+    try:
+        blocks = dlg.locator("label, fieldset")
+        n = await blocks.count()
+        for i in range(n):
+            b = blocks.nth(i)
+            label = (await b.inner_text()).strip()
+            if not label:
+                continue
+            required = bool(re.search(r"\*|obligatorio|required", label, re.I))
+            if not required:
+                continue
+            # Check if field has a value
+            sel = b.locator("select").first
+            txt = b.locator("input[type='text'], input:not([type]), textarea").first
+            radios = b.locator("input[type='radio']")
+            empty = False
+            if await sel.count() > 0:
+                val = await sel.input_value()
+                empty = not val or val.strip() == ""
+            elif await txt.count() > 0:
+                val = await txt.input_value()
+                empty = not val or val.strip() == ""
+            elif await radios.count() > 0:
+                checked = await b.locator("input[type='radio']:checked").count()
+                empty = checked == 0
+            if empty:
+                blocking.append(label[:80])
+    except Exception:
+        pass
+    return blocking
+
+
 
 
 async def _open_easy_apply(extractor: Any, job_id: str) -> dict[str, Any]:
@@ -737,7 +738,9 @@ async def _extract_questions(
     while seen_steps < 6:
         dlg = await _apply_modal(page)
         if dlg is None:
-            break
+            # Some layouts render the form outside the detected [role=dialog]
+            # container; scan the page rather than reporting zero questions.
+            dlg = page
         try:
             controls = dlg.locator("input, select, textarea")
             n = await controls.count()
@@ -878,22 +881,27 @@ async def _fill_field(
 ) -> bool:
     """Fill one field matched by its label. Returns success.
 
-    Control-first: iterate the current step's controls, resolve each
-    control's label exactly like _extract_questions does, and act on the
-    matching control directly. No ancestor/row guessing.
+    Control-first: iterate the step's controls, resolve each control's
+    label exactly like _extract_questions does, and act on the matching
+    control directly. Scopes are tried in order — the detected apply dialog,
+    then the whole page — because LinkedIn sometimes renders the form (or a
+    hidden duplicate of it) outside the [role=dialog] container, so the first
+    matching control found may not be the fillable one.
     """
+    if len(_FILL_CALLS) < 60:
+        _FILL_CALLS.append(label)
     dlg = await _apply_modal(page)
-    if dlg is None:
-        return False
-    try:
-        # Radio group by name: pick the option matching the value.
-        # Option labels use the extraction-time logic (label[for]/wrap/value),
-        # NOT _resolve_control_label (which returns the group question text).
-        if radio_name:
-            global _RADIO_DEBUG
-            _RADIO_DEBUG = {"name": radio_name}
+    scopes = [s for s in (dlg, page) if s is not None]
+
+    # Radio group by name: pick the option matching the value.
+    # Option labels use the extraction-time logic (label[for]/wrap/value),
+    # NOT _resolve_control_label (which returns the group question text).
+    if radio_name:
+        global _RADIO_DEBUG
+        _RADIO_DEBUG = {"name": radio_name}
+        for scope in scopes:
             try:
-                group = dlg.locator(
+                group = scope.locator(
                     f"input[type='radio'][name='{radio_name}']")
                 m = await group.count()
                 _RADIO_DEBUG["count"] = m
@@ -925,24 +933,65 @@ async def _fill_field(
                         continue
             except Exception as exc:
                 _RADIO_DEBUG["error"] = str(exc)[:200]
-            return False
-        # File upload (CV).
-        if cv_path and label == "__cv__":
-            inp = dlg.locator("input[type='file']").first
-            if await inp.count() > 0:
-                await inp.set_input_files(cv_path, timeout=15000)
-                return True
-            return False
-        want = _norm(label)
+        return False
+
+    # File upload (CV). LinkedIn keeps the <input type=file> hidden (often
+    # at page level, outside the dialog, or removed once a resume is
+    # already attached). Try, in order: the dialog input, the page input,
+    # then the upload button via a file chooser (which also covers the
+    # "change resume" flow when a CV is already selected).
+    if cv_path and label == "__cv__":
+        for scope in scopes:
+            try:
+                inp = scope.locator("input[type='file']").first
+                if await inp.count() > 0:
+                    await inp.set_input_files(cv_path, timeout=15000)
+                    return True
+            except Exception:
+                continue
+        # Fall back to the upload control + file chooser.
+        for loc in scopes:
+            for pat in (
+                r"Cargar currículum",
+                r"Subir currículum",
+                r"Cambiar currículum",
+                r"Selecciona o carga",
+                r"carga un curr",
+                r"Upload resume",
+                r"Change resume",
+                r"Upload a resume",
+                r"Adjuntar",
+                r"^Cargar$",
+                r"^Subir$",
+            ):
+                try:
+                    btn = loc.get_by_role("button", name=re.compile(pat, re.I)).first
+                    if await btn.count() == 0:
+                        btn = loc.locator("button, a, label").filter(
+                            has_text=re.compile(pat, re.I)).first
+                    if await btn.count() == 0 or not await btn.is_visible():
+                        continue
+                    async with page.expect_file_chooser(timeout=10000) as fc:
+                        await btn.click(timeout=5000)
+                    chooser = await fc.value
+                    await chooser.set_files(cv_path)
+                    return True
+                except Exception:
+                    continue
+        return False
+
+    want = _norm(label)
+
+    async def _fill_in(scope: Any) -> bool:
         try:
-            controls = dlg.locator("input, select, textarea")
+            controls = scope.locator("input, select, textarea")
             n = await controls.count()
         except Exception:
             return False
         for i in range(n):
             try:
                 c = controls.nth(i)
-                clab = _norm(await _resolve_control_label(dlg, c))
+                clab = _norm(await _resolve_control_label(scope, c))
                 if clab != want:
                     continue
                 tag = await c.evaluate("el => el.tagName.toLowerCase()")
@@ -965,7 +1014,7 @@ async def _fill_field(
                 if itype == "radio":
                     # Click the option whose label matches the value.
                     name = (await c.get_attribute("name")) or ""
-                    group = dlg.locator(
+                    group = scope.locator(
                         f"input[type='radio'][name='{name}']") if name else controls
                     try:
                         m = await group.count()
@@ -974,7 +1023,7 @@ async def _fill_field(
                     for j in range(m):
                         try:
                             opt = group.nth(j)
-                            olab = _norm(await _resolve_control_label(dlg, opt))
+                            olab = _norm(await _resolve_control_label(scope, opt))
                             if _norm(value) in olab or olab in _norm(value):
                                 await opt.click(timeout=5000)
                                 return True
@@ -985,8 +1034,14 @@ async def _fill_field(
                 return True
             except Exception:
                 continue
-    except Exception as exc:
-        logger.warning("fill failed for %r: %s", label, exc)
+        return False
+
+    for scope in scopes:
+        try:
+            if await _fill_in(scope):
+                return True
+        except Exception as exc:
+            logger.warning("fill failed for %r: %s", label, exc)
     return False
 
 
@@ -1040,7 +1095,6 @@ def register_apply_tools(
         title="Prepare Job Application",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"job", "apply", "prepare"},
-        exclude_args=["extractor"],
     )
     async def prepare_application(
         job_id: Annotated[str, Field(description="LinkedIn job ID (e.g. 4467280735)")],
@@ -1151,7 +1205,6 @@ def register_apply_tools(
             "openWorldHint": True,
         },
         tags={"job", "apply", "submit"},
-        exclude_args=["extractor"],
     )
     async def submit_application(
         job_id: Annotated[str, Field(description="LinkedIn job ID")],
@@ -1237,6 +1290,8 @@ def register_apply_tools(
             approved = {_norm(str(a.get("label", ""))): str(a.get("value", ""))
                         for a in answers}
             filled, missing_required, failed = [], [], []
+            _FILL_CALLS.clear()
+            seen_q: list[str] = []
             cv_done = False
             for _step in range(8):
                 modal = await _apply_modal(page)
@@ -1244,14 +1299,13 @@ def register_apply_tools(
                     attempt.update(status="aborted", reason="apply modal lost mid-fill")
                     _log_apply(attempt)
                     return attempt
-                try:
-                    send_probe = modal.locator("button").filter(
-                        has_text=_SUBMIT_LABELS)
-                    if await send_probe.count() > 0:
-                        break  # Review screen reached
-                except Exception:
-                    pass
+                # NOTE: no early "submit button present" break here. Some
+                # layouts keep a hidden/leftover Enviar control in the dialog,
+                # which made the loop bail before filling anything. The final
+                # submit poll below is the single source of truth for "we are
+                # on the review screen".
                 step_qs, _w = await _extract_questions(page, job_id, advance=False)
+                seen_q.extend(q["label"] for q in step_qs)
                 for q in step_qs:
                     if q["label"] in filled:
                         continue  # already filled on a previous loop pass
@@ -1279,13 +1333,13 @@ def register_apply_tools(
                 nxt = modal.locator("button").filter(has_text=_ADVANCE_LABELS).first
                 try:
                     # Wait for Next/Review to be enabled (handles Pinpoint multi-step)
-                    enabled, blocking = await _wait_for_next_enabled(page, dlg, max_wait_s=15.0)
+                    enabled, blocking = await _wait_for_next_enabled(page, modal, max_wait_s=15.0)
                     if not enabled:
                         logger.warning("Next/Review button not enabled after 15s; blocking fields: %s", blocking)
                         # Try to auto-fill any obvious blocking fields with profile defaults
-                        await _auto_fill_blocking_fields(page, dlg, blocking)
+                        await _auto_fill_blocking_fields(page, modal, blocking)
                         # Re-check once after auto-fill
-                        enabled, blocking = await _wait_for_next_enabled(page, dlg, max_wait_s=5.0)
+                        enabled, blocking = await _wait_for_next_enabled(page, modal, max_wait_s=5.0)
                         if not enabled:
                             break
                     if await nxt.count() > 0 and await nxt.is_enabled():
@@ -1313,6 +1367,17 @@ def register_apply_tools(
                          {_norm(f) for f in filled} and a.get("label") not in failed]
             failed.extend(unmatched)
             if missing_required or failed:
+                _dbg: list[str] = []
+                try:
+                    _ct = page.locator("input, select, textarea")
+                    _cn = await _ct.count()
+                    for _i in range(min(_cn, 60)):
+                        try:
+                            _dbg.append(await _resolve_control_label(page, _ct.nth(_i)))
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
                 await _close_modal(page)
                 attempt.update(
                     status="aborted",
@@ -1320,6 +1385,9 @@ def register_apply_tools(
                     failed_fields=failed,
                     filled_ok=filled,
                     radio_debug=_RADIO_DEBUG,
+                    page_labels=_dbg,
+                    questions_seen=list(dict.fromkeys(seen_q)),
+                    fill_calls=list(_FILL_CALLS),
                 )
                 _log_apply(attempt)
                 return attempt
@@ -1338,6 +1406,20 @@ def register_apply_tools(
                     await page.wait_for_timeout(1500)
                 except Exception:
                     break
+            # The dialog element is often replaced on the final step, so
+            # re-resolve it and poll for the submit button to render/enable
+            # before giving up.
+            fresh = await _apply_modal(page)
+            if fresh is not None:
+                dlg = fresh
+            send = dlg.locator("button").filter(has_text=_SUBMIT_LABELS).first
+            for _ in range(10):
+                try:
+                    if await send.count() > 0 and await send.is_enabled():
+                        break
+                except Exception:
+                    pass
+                await page.wait_for_timeout(600)
             if preview_only:
                 try:
                     review_text = (await dlg.inner_text(timeout=5000))[:2000]
@@ -1359,7 +1441,6 @@ def register_apply_tools(
                 _log_apply(attempt)
                 await ctx.report_progress(progress=100, total=100, message="review captured")
                 return attempt
-            send = dlg.locator("button").filter(has_text=_SUBMIT_LABELS).first
             try:
                 if await send.count() == 0 or not await send.is_enabled():
                     await _close_modal(page)

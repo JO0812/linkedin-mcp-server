@@ -33,7 +33,6 @@ def register_person_tools(
         title="Get Person Profile",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"person", "scraping"},
-        exclude_args=["extractor"],
     )
     async def get_person_profile(
         linkedin_username: str,
@@ -106,7 +105,6 @@ def register_person_tools(
         title="Search People",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"person", "search"},
-        exclude_args=["extractor"],
     )
     async def search_people(
         keywords: str,
@@ -189,7 +187,6 @@ def register_person_tools(
         title="Connect With Person",
         annotations={"destructiveHint": True, "openWorldHint": True},
         tags={"person", "actions"},
-        exclude_args=["extractor"],
     )
     async def connect_with_person(
         linkedin_username: str,
@@ -258,7 +255,6 @@ def register_person_tools(
         title="Get Sidebar Profiles",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"person", "scraping"},
-        exclude_args=["extractor"],
     )
     async def get_sidebar_profiles(
         linkedin_username: str,
@@ -311,7 +307,6 @@ def register_person_tools(
         title="Get My Profile",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"person", "scraping"},
-        exclude_args=["extractor"],
     )
     async def get_my_profile(
         ctx: Context,
